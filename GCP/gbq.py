@@ -61,6 +61,69 @@ def ensure_dataset(
         client.create_dataset(ds, exists_ok=True)
 
 
+def _build_bq_load_job_config(
+    *,
+    partition_field: Optional[str] = None,
+    clustering_fields: Optional[Sequence[str]] = None,
+    create_disposition: str = "CREATE_IF_NEEDED",
+    write_disposition: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Construct a BigQuery load job configuration dict for use with pandas_gbq/to_gbq.
+
+    Parameters
+    ----------
+    partition_field : Optional[str], default None
+        Column name (DATE/TIMESTAMP/DATETIME) used for DAY-based time partitioning.
+        If provided, job_config['timePartitioning'] = {"type": "DAY", "field": partition_field}.
+    clustering_fields : Optional[Sequence[str]], default None
+        Up to four column names to cluster by within each partition. Improves pruning/grouping.
+        If provided, job_config['clustering'] = {"fields": list(clustering_fields)}.
+    create_disposition : str, default "CREATE_IF_NEEDED"
+        Table creation behavior:
+          - "CREATE_IF_NEEDED": auto-create if missing (default).
+          - "CREATE_NEVER": fail if table does not exist.
+        Sets job_config['createDisposition'].
+    write_disposition : Optional[str], default None
+        Write behavior when table exists:
+          - "WRITE_APPEND": append rows.
+          - "WRITE_TRUNCATE": overwrite table data.
+          - "WRITE_EMPTY": fail if not empty.
+        If provided, sets job_config['writeDisposition'].
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        A dict suitable for the BigQuery LoadJob configuration (i.e., the value for
+        configuration['load']) or None if no advanced options were requested.
+
+    Notes
+    -----
+    - Any keys whose values would be None are removed to avoid API validation errors.
+    - Example result when all options are used:
+        {
+          "timePartitioning": {"type": "DAY", "field": "event_time"},
+          "clustering": {"fields": ["user_id"]},
+          "createDisposition": "CREATE_IF_NEEDED",
+          "writeDisposition": "WRITE_APPEND"
+        }
+    """
+    if not any([partition_field, clustering_fields, write_disposition]) and create_disposition == "CREATE_IF_NEEDED":
+        return None
+
+    cfg: Dict[str, Any] = {}
+    if partition_field:
+        cfg["timePartitioning"] = {"type": "DAY", "field": partition_field}
+    if clustering_fields:
+        cfg["clustering"] = {"fields": list(clustering_fields)}
+    if create_disposition:
+        cfg["createDisposition"] = create_disposition
+    if write_disposition:
+        cfg["writeDisposition"] = write_disposition
+
+    return cfg
+
+
 def load_dataframe_to_bq(
     df: pd.DataFrame,
     *,
@@ -110,22 +173,14 @@ def load_dataframe_to_bq(
 
     table_fqdn = f"{dataset_id}.{table_id}"
 
-    # Build optional job_config for partitioning/clustering & dispositions
-    job_config = None
-    if any([partition_field, clustering_fields, create_disposition, write_disposition]):
-        job_config = {
-            "timePartitioning": {"type": "DAY", "field": partition_field}
-            if partition_field
-            else None,
-            "clustering": {"fields": list(clustering_fields)}
-            if clustering_fields
-            else None,
-            "createDisposition": create_disposition,
-        }
-        if write_disposition:
-            job_config["writeDisposition"] = write_disposition
-        # Remove None entries to avoid API validation issues
-        job_config = {k: v for k, v in job_config.items() if v is not None}
+
+ 
+    job_config = _build_bq_load_job_config(
+            partition_field=partition_field,
+            clustering_fields=clustering_fields,
+            create_disposition=create_disposition,
+            write_disposition=write_disposition,
+        )
 
     to_gbq(
         dataframe=df,
@@ -138,3 +193,17 @@ def load_dataframe_to_bq(
         # Pass through job config if we built one
         configuration={"load": job_config} if job_config else None,
     )
+
+
+# Example usage....
+load_dataframe_to_bq(
+    df,
+    project_id="my-project",
+    dataset_id="analytics",
+    table_id="events",
+    if_exists="append",
+    location="US",
+    partition_field="event_time",
+    clustering_fields=["user_id", "action"],
+)
+
