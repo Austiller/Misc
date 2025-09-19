@@ -1,4 +1,4 @@
-from imds import boto3_session_from_role_name
+from imds import boto3_session_from_access_key_id
 
 
 """
